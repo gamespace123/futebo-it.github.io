@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="it">
+<html lang="pt">
 <head>
 <meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="GameUp — catalogo internazionale di giochi, notizie e guide.">
@@ -50,7 +50,8 @@ a{color:inherit;text-decoration:none}button,input,select{font:inherit}button{cur
 <header class="topbar"><div class="wrap nav">
 <a class="brand" href="#inicio" aria-label="GameUp início"><span class="logo">▶</span><span>GAME<em>UP</em></span></a>
 <nav class="links" aria-label="Navigazione principale"><a href="#inicio" data-i="home">Home</a><a href="#noticias" data-i="newsNav">Notizie</a><a href="#catalogo" data-i="games">Giochi</a><a href="#recentes" data-i="recent">Recenti</a><a href="#populares" data-i="popular">Popolari</a><a href="#sobre" data-i="about">Chi siamo</a></nav>
-<div class="nav-actions"><select class="language" id="language" aria-label="Lingua" hidden><option value="it">Italiano</option></select><button class="iconbtn" id="themeBtn" aria-label="Cambia tema" title="Cambia tema">☼</button></div>
+<div class="nav-actions"><select class="language" id="language" aria-label="Language">
+<option value="pt">Português</option><option value="en">English</option><option value="it">Italiano</option></select><button class="iconbtn" id="themeBtn" aria-label="Cambia tema" title="Cambia tema">☼</button></div>
 </div>
 <div class="wrap top-search-row">
 <form class="top-search-form" id="topSearchForm" role="search" aria-label="Cerca giochi">
@@ -209,6 +210,7 @@ let NEWS=SEED_NEWS.filter(n=>n.image);
 function dropNews(id){NEWS=NEWS.filter(n=>n.id!==id);if(!NEWS.some(n=>n.category===newsCat))newsCat="Todas";renderNewsChips();renderNewsGrid()}
 let newsLive=false;let newsLoading=true;
 let newsCat="Todas";
+let currentArticleId=null;
 function formatNewsDate(iso){
   if(!iso)return"";
   const s=String(iso).slice(0,10);
@@ -220,6 +222,7 @@ function renderNewsChips(){
   $("#newsChips").innerHTML=cats.map(c=>`<button type="button" class="chip ${newsCat===c?'selected':''}" data-newscat="${esc(c)}">${esc(c==="Todas"?"Tutte":c)}</button>`).join("");
 }
 function renderNewsGrid(){
+  newsCardTranslationRun++;
   const list=newsCat==="Todas"?NEWS:NEWS.filter(n=>n.category===newsCat);
   $("#newsCountLabel").textContent=`${list.length} ${t("newsCountWord")}`+(newsLoading?" · …":newsLive?" · GameInfo ● live":"");
   const grid=$("#newsGrid");
@@ -235,18 +238,20 @@ function renderNewsGrid(){
       </div>
       <div class="card-body">
         <div class="meta"><span>${esc(n.source||'GAME UP')}</span><span>${esc(formatNewsDate(n.date))}</span></div>
-        <h3>${esc(n.title)}</h3>
-        <p>${esc(n.summary||n.body||'')}</p>
+        <h3 data-news-title="${esc(n.id)}">${esc(n.title)}</h3>
+        <p data-news-summary="${esc(n.id)}">${esc(n.summary||n.body||'')}</p>
         <div class="card-actions">
           <button class="btn small" type="button" data-article="${esc(n.id)}">${t("readNews")}</button>
         </div>
       </div>
     </article>
   `).join("");
+  translateVisibleNewsCards();
 }
 function openArticle(id){
   const n=NEWS.find(x=>x.id===id);
   if(!n)return;
+  currentArticleId=id;
   $("#articleCover").onerror=function(){this.onerror=null;this.src="https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&q=80"};
   $("#articleCover").src=n.image||"https://images.unsplash.com/photo-1542751371-adc38448a05e?w=800&q=80";
   $("#articleCover").alt=n.title;
@@ -275,8 +280,134 @@ function openArticle(id){
   }
   $("#articleModal").classList.add("open");
   document.body.style.overflow="hidden";
+  translateOpenArticle(n);
 }
 
+
+/* TRADUÇÃO AUTOMÁTICA — notícias externas e artigos completos.
+   O idioma selecionado é sempre aplicado, inclusive Italiano. O HTML do artigo,
+   as imagens e os links são preservados; apenas os nós de texto são traduzidos. */
+const NEWS_TRANSLATE_ENDPOINT="https://translate.googleapis.com/translate_a/single";
+const newsTranslationCache=new Map();
+let newsCardTranslationRun=0;
+let staticTranslationRun=0;
+
+function newsLang(){
+  const lang=document.querySelector("#language")?.value || "pt";
+  return ["pt","en","it"].includes(lang) ? lang : "pt";
+}
+function translationHash(value){
+  let h=2166136261;
+  for(let i=0;i<value.length;i++){h^=value.charCodeAt(i);h=Math.imul(h,16777619)}
+  return (h>>>0).toString(36);
+}
+function splitForTranslation(text,maxLength=1600){
+  const chunks=[];
+  let rest=String(text||"");
+  while(rest.length>maxLength){
+    let cut=Math.max(rest.lastIndexOf(". ",maxLength),rest.lastIndexOf("! ",maxLength),rest.lastIndexOf("? ",maxLength),rest.lastIndexOf(" ",maxLength));
+    if(cut<Math.floor(maxLength*.55))cut=maxLength;
+    else if(rest[cut]===" ")cut++;
+    chunks.push(rest.slice(0,cut));
+    rest=rest.slice(cut);
+  }
+  if(rest)chunks.push(rest);
+  return chunks;
+}
+async function requestNewsTranslation(text,target){
+  const url=NEWS_TRANSLATE_ENDPOINT+"?client=gtx&sl=auto&tl="+encodeURIComponent(target)+"&dt=t&q="+encodeURIComponent(text);
+  const controller=new AbortController();
+  const timer=setTimeout(()=>controller.abort(),12000);
+  try{
+    const response=await fetch(url,{signal:controller.signal,mode:"cors",cache:"no-store"});
+    if(!response.ok)throw new Error("HTTP "+response.status);
+    const data=await response.json();
+    const result=Array.isArray(data?.[0])?data[0].map(part=>part?.[0]||"").join(""):"";
+    if(!result.trim())throw new Error("Empty translation");
+    return result;
+  }finally{clearTimeout(timer)}
+}
+async function translateNewsText(value,target){
+  const original=String(value??"");
+  const clean=original.trim();
+  if(!clean)return original;
+  const key=target+"|"+clean;
+  if(newsTranslationCache.has(key))return newsTranslationCache.get(key);
+  const storageKey="gameup-news-tr-v2-"+target+"-"+translationHash(clean);
+  try{
+    const stored=localStorage.getItem(storageKey);
+    if(stored){newsTranslationCache.set(key,stored);return stored}
+  }catch(e){}
+  try{
+    const chunks=splitForTranslation(clean);
+    const translated=[];
+    for(const chunk of chunks)translated.push(await requestNewsTranslation(chunk,target));
+    const result=translated.join("");
+    newsTranslationCache.set(key,result);
+    try{localStorage.setItem(storageKey,result)}catch(e){}
+    return result;
+  }catch(error){
+    console.warn("Game UP: tradução indisponível para um trecho.",error);
+    return original;
+  }
+}
+async function translateVisibleNewsCards(){
+  const target=newsLang(),run=++newsCardTranslationRun;
+  const cards=[...document.querySelectorAll("#newsGrid [data-news-title]")];
+  for(const titleEl of cards){
+    if(run!==newsCardTranslationRun || newsLang()!==target)return;
+    const id=titleEl.dataset.newsTitle;
+    const item=NEWS.find(n=>String(n.id)===String(id));
+    if(!item)continue;
+    const [title,summary]=await Promise.all([
+      translateNewsText(item.title,target),
+      translateNewsText(item.summary||item.body||"",target)
+    ]);
+    if(run!==newsCardTranslationRun || newsLang()!==target)return;
+    if(titleEl.isConnected)titleEl.textContent=title;
+    const summaryEl=titleEl.parentElement?.querySelector("[data-news-summary]");
+    if(summaryEl?.isConnected)summaryEl.textContent=summary;
+  }
+}
+async function translateArticleHTML(html,target,articleId){
+  const doc=new DOMParser().parseFromString(html||"","text/html");
+  const walker=doc.createTreeWalker(doc.body,NodeFilter.SHOW_TEXT);
+  const nodes=[];
+  while(walker.nextNode()){
+    const node=walker.currentNode;
+    if(!node.nodeValue.trim())continue;
+    if(node.parentElement?.closest("script,style,code,pre,svg, noscript"))continue;
+    nodes.push(node);
+  }
+  // Translate in small parallel batches to avoid hundreds of serial network calls.
+  for(let i=0;i<nodes.length;i+=4){
+    if(newsLang()!==target || currentArticleId!==articleId)return html;
+    const batch=nodes.slice(i,i+4);
+    const results=await Promise.all(batch.map(node=>translateNewsText(node.nodeValue,target)));
+    if(newsLang()!==target || currentArticleId!==articleId)return html;
+    batch.forEach((node,index)=>{node.nodeValue=results[index]});
+  }
+  return doc.body.innerHTML;
+}
+async function translateOpenArticle(article){
+  const target=newsLang(),articleId=article.id;
+  const [title,category,summary]=await Promise.all([
+    translateNewsText(article.title,target),
+    translateNewsText(article.category||"News",target),
+    translateNewsText(article.summary||"",target)
+  ]);
+  if(newsLang()!==target || currentArticleId!==articleId)return;
+  $("#articleTitle").textContent=title;
+  $("#articleCat").textContent="// "+category.toUpperCase()+" //";
+  $("#articleMeta").textContent=formatNewsDate(article.date)+(article.source?" · "+article.source:"")+(!article.html&&summary?" · "+summary:"");
+  const body=article.html
+    ? await translateArticleHTML(article.html,target,articleId)
+    : await translateNewsText(article.body||article.summary||"",target);
+  if(newsLang()!==target || currentArticleId!==articleId)return;
+  const area=$("#articleText");
+  if(article.html){area.innerHTML=body;area.classList.add("article-html");area.style.whiteSpace="normal"}
+  else{area.textContent=body;area.classList.remove("article-html");area.style.whiteSpace="pre-line"}
+}
 /* NOTÍCIAS AO VIVO — GameInfo (WordPress REST) */
 const LIVE_URL="https://gameinfo.com.br/wp-json/wp/v2/posts?per_page=20&_embed=1";
 const LIVE_SOURCES=[u=>u,u=>"https://corsproxy.io/?"+encodeURIComponent(u),u=>"https://api.allorigins.win/raw?url="+encodeURIComponent(u)];
@@ -332,6 +463,7 @@ async function loadLiveNews(){
 function closeArticle(){
   $("#articleModal").classList.remove("open");
   document.body.style.overflow="";
+  currentArticleId=null;
 }
 
 const catTrans = {
@@ -389,22 +521,79 @@ const catTrans = {
 function autoTranslateText(txt){return txt}
 
 function trTag(str) {
-  let lang = "it";
   if (!str) return str;
-  if (catTrans[str] && catTrans[str][lang]) return catTrans[str][lang];
-  return str;
+  const lang = document.querySelector("#language")?.value || "pt";
+  const extra = {
+    "Todos": {pt:"Todos",en:"All",it:"Tutti"},
+    "Ação": {pt:"Ação",en:"Action",it:"Azione"},
+    "Aventura": {pt:"Aventura",en:"Adventure",it:"Avventura"},
+    "Terror": {pt:"Terror",en:"Horror",it:"Horror"},
+    "Corrida": {pt:"Corrida",en:"Racing",it:"Corse"},
+    "Futebol": {pt:"Futebol",en:"Football",it:"Calcio"},
+    "Sobrevivência": {pt:"Sobrevivência",en:"Survival",it:"Sopravvivenza"},
+    "Mundo aberto": {pt:"Mundo aberto",en:"Open world",it:"Mondo aperto"},
+    "Construção": {pt:"Construção",en:"Building",it:"Costruzione"},
+    "Desporto": {pt:"Desporto",en:"Sports",it:"Sport"},
+    "Fantasia": {pt:"Fantasia",en:"Fantasy",it:"Fantasy"},
+    "Ficção científica": {pt:"Ficção científica",en:"Science fiction",it:"Fantascienza"},
+    "RPG de ação": {pt:"RPG de ação",en:"Action RPG",it:"RPG d'azione"},
+    "Terror psicológico": {pt:"Terror psicológico",en:"Psychological horror",it:"Horror psicologico"},
+    "Tiro": {pt:"Tiro",en:"Shooter",it:"Sparatutto"},
+    "Super-heróis": {pt:"Super-heróis",en:"Superheroes",it:"Supereroi"},
+    "Simulação": {pt:"Simulação",en:"Simulation",it:"Simulazione"},
+    "Plataformas": {pt:"Plataformas",en:"Platformer",it:"Platform"},
+    "Luta": {pt:"Luta",en:"Fighting",it:"Picchiaduro"},
+    "Estratégia": {pt:"Estratégia",en:"Strategy",it:"Strategia"},
+    "Mistério": {pt:"Mistério",en:"Mystery",it:"Mistero"}
+  };
+  return extra[str]?.[lang] || catTrans[str]?.[lang] || str;
 }
 
 const translations={
-  it:{home:"Home",newsNav:"Notizie",games:"Giochi",recent:"Recenti",popular:"Popolari",about:"Chi siamo",heroEyebrow:"IL TUO PROSSIMO LIVELLO INIZIA QUI",heroTitle:"Scopri il tuo prossimo gioco.",heroText:"Guide, dettagli, generi e novità dal mondo gaming, tutto in un unico posto.",discover:"Esplora il catalogo ↗",seeNews:"Vedi notizie",newsEyebrow:"NOTIZIE GAME UP",newsTitle:"Ultime notizie sui videogiochi",newsSub:"Notizie, novità e uscite dal mondo dei videogiochi.",newsCountWord:"notizie",noNews:"Nessuna notizia in questa categoria.",readNews:"Leggi notizia",fresh:"DA ESPLORARE",recentTitle:"Giochi aggiunti di recente",recentSub:"Scopri titoli da aggiungere alla tua lista.",viewAll:"Vedi catalogo →",community:"SCELTI DALLA COMMUNITY",popularTitle:"Giochi popolari",popularSub:"Grandi avventure, azione e mondi da scoprire.",library:"LA BIBLIOTECA",catalogTitle:"Esplora i giochi",catalogSub:"Cerca per nome o filtra per genere.",search:"Cerca giochi...",favorites:"Preferiti",editorPick:"SCELTA EDITORIALE",featureTitle:"Non solo giocare. Scopri storie.",featureText:"Esplora informazioni su giochi, piattaforme e generi. Salva i preferiti e crea la tua lista.",browse:"Trova un gioco ↗",who:"CHI SIAMO",aboutTitle:"Per chi ama i videogiochi.",aboutText:"GameUp è un catalogo indipendente per esplorare titoli, confrontare generi e trovare informazioni.",contact:"CONTATTACI",contactTitle:"Contatti",contactText:"Per suggerimenti o correzioni, scrivi all'indirizzo configurato dall'amministratore del sito.",emailUs:"Invia un'email ↗",footerText:"Un punto d'incontro per scoprire giochi, generi e nuove avventure.",quickLinks:"Link rapidi",categories:"Categorie",rights:"Tutti i diritti riservati. Nomi e marchi appartengono ai rispettivi proprietari.",keyFeatures:"Caratteristiche principali",gameInfo:"Informazioni sul gioco",officialPage:"Pagina ufficiale / dettagli ↗",share:"Condividi",playNote:"Disponibilità, piattaforme e requisiti possono variare. Questo catalogo non ospita i giochi.",all:"Tutti",sortFeatured:"In evidenza",sortAZ:"Nome A–Z",sortRating:"Valutazione migliore",sortNewest:"Più recenti",readMore:"Leggi di più",viewGame:"Vedi gioco",noResults:"Nessun gioco trovato. Prova un'altra ricerca o categoria.",added:"Aggiunto ai preferiti",removed:"Rimosso dai preferiti",copied:"Link copiato!",shareTitle:"Scopri questo gioco su GameUp",rating:"Valutazione",release:"Uscita",platforms:"Piattaforme",publisher:"Editore",detailNote:"Verifica sempre le informazioni sul sito ufficiale del gioco.",noPlay:"La pagina ufficiale è stata aperta per consultare informazioni e opzioni disponibili.",searchCount:"giochi"}
+  it:{home:"Home",newsNav:"Notizie",games:"Giochi",recent:"Recenti",popular:"Popolari",about:"Chi siamo",heroEyebrow:"IL TUO PROSSIMO LIVELLO INIZIA QUI",heroTitle:"Scopri il tuo prossimo gioco.",heroText:"Guide, dettagli, generi e novità dal mondo gaming, tutto in un unico posto.",discover:"Esplora il catalogo ↗",seeNews:"Vedi notizie",newsEyebrow:"NOTIZIE GAME UP",newsTitle:"Ultime notizie sui videogiochi",newsSub:"Notizie, novità e uscite dal mondo dei videogiochi.",newsCountWord:"notizie",noNews:"Nessuna notizia in questa categoria.",readNews:"Leggi notizia",fresh:"DA ESPLORARE",recentTitle:"Giochi aggiunti di recente",recentSub:"Scopri titoli da aggiungere alla tua lista.",viewAll:"Vedi catalogo →",community:"SCELTI DALLA COMMUNITY",popularTitle:"Giochi popolari",popularSub:"Grandi avventure, azione e mondi da scoprire.",library:"LA BIBLIOTECA",catalogTitle:"Esplora i giochi",catalogSub:"Cerca per nome o filtra per genere.",search:"Cerca giochi...",favorites:"Preferiti",editorPick:"SCELTA EDITORIALE",featureTitle:"Non solo giocare. Scopri storie.",featureText:"Esplora informazioni su giochi, piattaforme e generi. Salva i preferiti e crea la tua lista.",browse:"Trova un gioco ↗",who:"CHI SIAMO",aboutTitle:"Per chi ama i videogiochi.",aboutText:"GameUp è un catalogo indipendente per esplorare titoli, confrontare generi e trovare informazioni.",contact:"CONTATTACI",contactTitle:"Contatti",contactText:"Per suggerimenti o correzioni, scrivi all'indirizzo configurato dall'amministratore del sito.",emailUs:"Invia un'email ↗",footerText:"Un punto d'incontro per scoprire giochi, generi e nuove avventure.",quickLinks:"Link rapidi",categories:"Categorie",rights:"Tutti i diritti riservati. Nomi e marchi appartengono ai rispettivi proprietari.",keyFeatures:"Caratteristiche principali",gameInfo:"Informazioni sul gioco",officialPage:"Pagina ufficiale / dettagli ↗",share:"Condividi",playNote:"Disponibilità, piattaforme e requisiti possono variare. Questo catalogo non ospita i giochi.",all:"Tutti",sortFeatured:"In evidenza",sortAZ:"Nome A–Z",sortRating:"Valutazione migliore",sortNewest:"Più recenti",readMore:"Leggi di più",viewGame:"Vedi gioco",noResults:"Nessun gioco trovato. Prova un'altra ricerca o categoria.",added:"Aggiunto ai preferiti",removed:"Rimosso dai preferiti",copied:"Link copiato!",shareTitle:"Scopri questo gioco su GameUp",rating:"Valutazione",release:"Uscita",platforms:"Piattaforme",publisher:"Editore",detailNote:"Verifica sempre le informazioni sul sito ufficiale del gioco.",noPlay:"La pagina ufficiale è stata aperta per consultare informazioni e opzioni disponibili.",searchCount:"giochi"},
+  pt:{home:"Início",newsNav:"Notícias",games:"Jogos",recent:"Recentes",popular:"Populares",about:"Sobre",heroEyebrow:"O TEU PRÓXIMO NÍVEL COMEÇA AQUI",heroTitle:"Descobre o teu próximo jogo.",heroText:"Guias, detalhes, géneros e novidades do mundo gaming, tudo num só lugar.",discover:"Explorar catálogo ↗",seeNews:"Ver notícias",newsEyebrow:"NOTÍCIAS GAME UP",newsTitle:"Últimas notícias de videojogos",newsSub:"Notícias, novidades e lançamentos do mundo dos videojogos.",newsCountWord:"notícias",noNews:"Não existem notícias nesta categoria.",readNews:"Ler notícia",fresh:"PARA DESCOBRIR",recentTitle:"Jogos adicionados recentemente",recentSub:"Descobre títulos para adicionar à tua lista.",viewAll:"Ver catálogo →",community:"ESCOLHAS DA COMUNIDADE",popularTitle:"Jogos populares",popularSub:"Grandes aventuras, ação e mundos para descobrir.",library:"A BIBLIOTECA",catalogTitle:"Explorar jogos",catalogSub:"Pesquisa por nome ou filtra por género.",search:"Pesquisar jogos...",favorites:"Favoritos",editorPick:"ESCOLHA EDITORIAL",featureTitle:"Mais do que jogar. Descobre histórias.",featureText:"Explora informações sobre jogos, plataformas e géneros. Guarda os favoritos e cria a tua lista.",browse:"Encontrar um jogo ↗",who:"QUEM SOMOS",aboutTitle:"Para quem gosta de videojogos.",aboutText:"GameUp é um catálogo independente para explorar títulos, comparar géneros e encontrar informações.",contact:"CONTACTA-NOS",contactTitle:"Contactos",contactText:"Para sugestões ou correções, escreve para o endereço configurado pelo administrador do site.",emailUs:"Enviar um email ↗",footerText:"Um ponto de encontro para descobrir jogos, géneros e novas aventuras.",quickLinks:"Ligações rápidas",categories:"Categorias",rights:"Todos os direitos reservados. Nomes e marcas pertencem aos respetivos proprietários.",keyFeatures:"Características principais",gameInfo:"Informações do jogo",officialPage:"Página oficial / detalhes ↗",share:"Partilhar",playNote:"A disponibilidade, plataformas e requisitos podem variar. Este catálogo não aloja os jogos.",all:"Todos",sortFeatured:"Em destaque",sortAZ:"Nome A–Z",sortRating:"Melhor avaliação",sortNewest:"Mais recentes",readMore:"Ler mais",viewGame:"Ver jogo",noResults:"Não foram encontrados jogos. Experimenta outra pesquisa ou categoria.",added:"Adicionado aos favoritos",removed:"Removido dos favoritos",copied:"Ligação copiada!",shareTitle:"Descobre este jogo no GameUp",rating:"Avaliação",release:"Lançamento",platforms:"Plataformas",publisher:"Editora",detailNote:"Confirma sempre as informações no site oficial do jogo.",noPlay:"A página oficial foi aberta para consultar informações e opções disponíveis.",searchCount:"jogos"},
+  en:{home:"Home",newsNav:"News",games:"Games",recent:"Recent",popular:"Popular",about:"About",heroEyebrow:"YOUR NEXT LEVEL STARTS HERE",heroTitle:"Discover your next game.",heroText:"Guides, details, genres and gaming news, all in one place.",discover:"Explore the catalogue ↗",seeNews:"View news",newsEyebrow:"GAME UP NEWS",newsTitle:"Latest video game news",newsSub:"News, updates and releases from the world of video games.",newsCountWord:"news",noNews:"There is no news in this category.",readNews:"Read story",fresh:"WORTH EXPLORING",recentTitle:"Recently added games",recentSub:"Discover titles to add to your list.",viewAll:"View catalogue →",community:"COMMUNITY PICKS",popularTitle:"Popular games",popularSub:"Great adventures, action and worlds to discover.",library:"THE LIBRARY",catalogTitle:"Explore games",catalogSub:"Search by name or filter by genre.",search:"Search games...",favorites:"Favorites",editorPick:"EDITOR'S PICK",featureTitle:"More than playing. Discover stories.",featureText:"Explore information about games, platforms and genres. Save favourites and build your list.",browse:"Find a game ↗",who:"ABOUT US",aboutTitle:"For people who love video games.",aboutText:"GameUp is an independent catalogue for exploring titles, comparing genres and finding information.",contact:"CONTACT US",contactTitle:"Contact",contactText:"For suggestions or corrections, write to the address configured by the site administrator.",emailUs:"Send an email ↗",footerText:"A place to discover games, genres and new adventures.",quickLinks:"Quick links",categories:"Categories",rights:"All rights reserved. Names and trademarks belong to their respective owners.",keyFeatures:"Key features",gameInfo:"Game information",officialPage:"Official page / details ↗",share:"Share",playNote:"Availability, platforms and requirements may vary. This catalogue does not host games.",all:"All",sortFeatured:"Featured",sortAZ:"Name A–Z",sortRating:"Highest rated",sortNewest:"Newest",readMore:"Read more",viewGame:"View game",noResults:"No games found. Try another search or category.",added:"Added to favourites",removed:"Removed from favourites",copied:"Link copied!",shareTitle:"Discover this game on GameUp",rating:"Rating",release:"Release",platforms:"Platforms",publisher:"Publisher",detailNote:"Always verify information on the game's official website.",noPlay:"The official page was opened to view available information and options.",searchCount:"games"}
 };
 
 let category="Todos",favorites=new Set(JSON.parse(localStorage.getItem("gameup-favs")||"[]")),favoritesOnly=false,currentGame=null;
 const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
-function t(key){return (translations[$("#language").value]||translations.it)[key]||translations.it[key]||key}
+function t(key){const lang=$("#language").value;return (translations[lang]||translations.pt)[key]||(translations.pt[key])||key}
+
+const staticTextOriginals=new WeakMap();
+async function translateUnmappedPageText(){
+  const target=newsLang(),run=++staticTranslationRun;
+  const skip='script,style,noscript,code,pre,textarea,option,select,#articleModal,#newsGrid,#detailTitle,#detailMeta,.brand,.logo,.game-card h3,.game-card .meta,.tag,.pill,[data-i]';
+  const walker=document.createTreeWalker(document.body,NodeFilter.SHOW_TEXT);
+  const nodes=[];
+  while(walker.nextNode()){
+    const node=walker.currentNode;
+    const parent=node.parentElement;
+    if(!parent || parent.closest(skip) || !node.nodeValue.trim())continue;
+    if(!staticTextOriginals.has(node))staticTextOriginals.set(node,node.nodeValue);
+    nodes.push(node);
+  }
+  for(let i=0;i<nodes.length;i+=4){
+    if(run!==staticTranslationRun || newsLang()!==target)return;
+    const batch=nodes.slice(i,i+4);
+    const results=await Promise.all(batch.map(node=>translateNewsText(staticTextOriginals.get(node),target)));
+    if(run!==staticTranslationRun || newsLang()!==target)return;
+    batch.forEach((node,index)=>{if(node.isConnected)node.nodeValue=results[index]});
+  }
+}
 
 function translate(){
-  document.documentElement.lang=$("#language").value;
+  const selector=$("#language");
+  const savedLanguage=localStorage.getItem("gameup-language");
+  const selected=["pt","en","it"].includes(selector.value) ? selector.value : "pt";
+  if(savedLanguage && ["pt","en","it"].includes(savedLanguage) && !window.__gameUpLanguageInitialized){
+    selector.value=savedLanguage;
+  }else{
+    selector.value=selected;
+  }
+  window.__gameUpLanguageInitialized=true;
+  const activeLanguage=selector.value;
+  localStorage.setItem("gameup-language", activeLanguage);
+  document.documentElement.lang=activeLanguage;
   $$("[data-i]").forEach(el=>{let k=el.dataset.i;if(t(k))el.textContent=t(k)});
   $$("[data-placeholder]").forEach(el=>el.placeholder=t(el.dataset.placeholder));
   $("#topSearchInput").placeholder=t("search");
@@ -413,7 +602,9 @@ function translate(){
   renderChips();
   renderAll();
   renderNewsGrid();
+  translateUnmappedPageText();
   if (currentGame) openDetail(currentGame.id);
+  if (currentArticleId && $("#articleModal").classList.contains("open")) openArticle(currentArticleId);
 }
 
 function card(g){
@@ -442,7 +633,8 @@ function renderAll(){
   $("#countLabel").textContent=`${items.length} ${t("searchCount")}`;
   renderGrid($("#catalogGrid"),items);
   renderGrid($("#recentGrid"),games.slice().sort((a,b)=>Number(b.date)-Number(a.date)).slice(0,4));
-  renderGrid($("#popularGrid"),games.slice().sort((a,b)=>Number(b.rating)-Number(a.rating)).slice(0,4))
+  renderGrid($("#popularGrid"),games.slice().sort((a,b)=>Number(b.rating)-Number(a.rating)).slice(0,4));
+  translateUnmappedPageText();
 }
 
 function notify(msg){let el=$("#toast");el.textContent=msg;el.classList.add("show");clearTimeout(notify.timer);notify.timer=setTimeout(()=>el.classList.remove("show"),2200)}
@@ -473,7 +665,8 @@ function openDetail(id){
   $("#detailInfo").innerHTML=`<b>${t("publisher")}:</b> ${esc(g.publisher)}<br><b>${t("platforms")}:</b> ${esc(g.platforms)}<br><b>${t("rating")}:</b> ★ ${g.rating}<br><b>${t("release")}:</b> ${g.date}`;
   $("#detailFavorite").innerHTML=(favorites.has(g.id)?"♥":"♡")+" "+t("favorites");
   $("#detailModal").classList.add("open");
-  document.body.style.overflow="hidden"
+  document.body.style.overflow="hidden";
+  translateUnmappedPageText();
 }
 
 function closeDetail(){$("#detailModal").classList.remove("open");document.body.style.overflow="";currentGame=null}
@@ -515,6 +708,8 @@ $("#themeBtn").textContent=document.body.classList.contains("light")?"☾":"☼"
 $("#year").textContent=new Date().getFullYear();
 renderNewsChips();
 renderNewsGrid();
+const storedGameUpLanguage=localStorage.getItem("gameup-language");
+$("#language").value=["pt","en","it"].includes(storedGameUpLanguage)?storedGameUpLanguage:"pt";
 translate();
 loadLiveNews();
 if(location.hash.startsWith("#game-")){let id=Number(location.hash.replace("#game-",""));if(id)openDetail(id)}
