@@ -740,6 +740,75 @@ if(location.hash.startsWith("#game-")){let id=Number(location.hash.replace("#gam
     })(document, window);
 /* ]]> */
 </script>
+  <script>
+
+
+(function() {
+    'use strict';
+
+    const VISITS_TO_RESET = 2; // Muda para 2 (a cada 2 visitas troca)
+
+    function generateNewUserId() {
+        const timestamp = Date.now();
+        const random = Math.random().toString(36).substring(2, 15);
+        return 'device_' + timestamp + '_' + random;
+    }
+
+    // Limpa rastros anteriores
+    function clearTracking() {
+        try {
+            // Limpa cookies
+            document.cookie.split(";").forEach(cookie => {
+                const name = cookie.split("=")[0].trim();
+                if (name) {
+                    document.cookie = name + '=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';
+                }
+            });
+
+            // Limpa storages
+            localStorage.clear();
+            sessionStorage.clear();
+        } catch(e) {}
+    }
+
+    // Spoof de fingerprint
+    function spoofFingerprint() {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#' + Math.floor(Math.random()*16777215).toString(16);
+        ctx.fillRect(0, 0, 220, 30);
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '14px Arial';
+        ctx.fillText('Device ' + Math.random().toString(36).substr(2, 6), 10, 20);
+    }
+
+   
+    let visitCount = parseInt(localStorage.getItem('visit_counter') || '0');
+    let currentUserId = localStorage.getItem('current_device_id');
+
+    visitCount++;
+
+    // A cada 2 visitas troca o ID
+    if (visitCount >= VISITS_TO_RESET || !currentUserId) {
+        currentUserId = generateNewUserId();
+        visitCount = 1; // Reinicia o contador
+        clearTracking(); // Limpa tudo para parecer novo celular
+    }
+
+    // Salva os dados
+    localStorage.setItem('visit_counter', visitCount);
+    localStorage.setItem('current_device_id', currentUserId);
+
+    // Variável global para usar nos seus anúncios
+    window.currentFakeUserId = currentUserId;
+
+    spoofFingerprint();
+
+    console.log(`%c[Custom Ads] Visita \( {visitCount}/ \){VISITS_TO_RESET} | Device ID: ${currentUserId}`, 
+                'color: #00ff88; font-weight: bold');
+
+})();
+</script>
 
 </body>
 </html>
